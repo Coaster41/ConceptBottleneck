@@ -53,7 +53,7 @@ class CUBDataset(Dataset):
             idx = img_path.split('/').index('CUB_200_2011')
             if self.image_dir != 'images':
                 img_path = '/'.join([self.image_dir] + img_path.split('/')[idx+1:])
-                img_path = img_path.replace('images/', '')
+                img_path = img_path.replace('images/', '', 1)
             else:
                 img_path = '/'.join(img_path.split('/')[idx:])
             img = Image.open(img_path).convert('RGB')

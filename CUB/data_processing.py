@@ -47,6 +47,7 @@ def extract_data(data_dir):
 
     train_val_data, test_data = [], []
     train_data, val_data = [], []
+    val_files = None
     folder_list = [f for f in listdir(data_path) if isdir(join(data_path, f))]
     folder_list.sort() #sort by class index
     for i, folder in enumerate(folder_list):
