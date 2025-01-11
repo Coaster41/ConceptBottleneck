@@ -34,6 +34,19 @@ def ModelXtoCtoY(n_class_attr, pretrained, freeze, num_classes, use_aux, n_attri
         model2 = MLP(input_dim=n_attributes, num_classes=num_classes, expand_dim=expand_dim)
     return End2EndModel(model1, model2, use_relu, use_sigmoid, n_class_attr)
 
+
+# Latent Joint Model
+def ModelXtoCtoYLatent(n_class_attr, pretrained, freeze, num_classes, use_aux, n_attributes, n_latent_attr, expand_dim,
+                 use_relu, use_sigmoid):
+    model1 = inception_v3(pretrained=pretrained, freeze=freeze, num_classes=num_classes, aux_logits=use_aux,
+                          n_attributes=n_attributes+n_latent_attr, bottleneck=True, expand_dim=expand_dim,
+                          three_class=(n_class_attr == 3))
+    if n_class_attr == 3:
+        model2 = MLP(input_dim=(n_attributes+n_latent_attr) * n_class_attr, num_classes=num_classes, expand_dim=expand_dim)
+    else:
+        model2 = MLP(input_dim=(n_attributes+n_latent_attr), num_classes=num_classes, expand_dim=expand_dim)
+    return End2EndModel(model1, model2, use_relu, use_sigmoid, n_class_attr)
+
 # Standard Model
 def ModelXtoY(pretrained, freeze, num_classes, use_aux):
     return inception_v3(pretrained=pretrained, freeze=freeze, num_classes=num_classes, aux_logits=use_aux)

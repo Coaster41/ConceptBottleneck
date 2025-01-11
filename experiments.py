@@ -25,6 +25,7 @@ def run_experiments(dataset, args):
             train_oracle_C_to_y_and_test_on_Chat,
             train_Chat_to_y_and_test_on_Chat,
             train_X_to_C_to_y,
+            train_X_to_C_to_y_latent,
             train_X_to_y,
             train_X_to_Cy,
             train_probe,
@@ -45,6 +46,9 @@ def run_experiments(dataset, args):
 
     elif experiment == 'Joint':
         train_X_to_C_to_y(*args)
+
+    elif experiment == 'Joint_Latent':
+        train_X_to_C_to_y_latent(*args)
 
     elif experiment == 'Standard':
         train_X_to_y(*args)
@@ -73,7 +77,7 @@ def parse_arguments():
     assert sys.argv[1].upper() in ['OAI', 'CUB'], 'Please specify OAI or CUB dataset'
     assert sys.argv[2] in ['Concept_XtoC', 'Independent_CtoY', 'Sequential_CtoY',
                            'Standard', 'StandardWithAuxC', 'Multitask', 'Joint', 'Probe',
-                           'TTI', 'Robustness', 'HyperparameterSearch'], \
+                           'TTI', 'Robustness', 'HyperparameterSearch', 'Joint_Latent'], \
         'Please specify valid experiment. Current: %s' % sys.argv[2]
     dataset = sys.argv[1].upper()
     experiment = sys.argv[2].upper()

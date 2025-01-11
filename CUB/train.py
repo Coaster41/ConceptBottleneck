@@ -15,7 +15,8 @@ from analysis import Logger, AverageMeter, accuracy, binary_accuracy
 from CUB import probe, tti, gen_cub_synthetic, hyperopt
 from CUB.dataset import load_data, find_class_imbalance
 from CUB.config import BASE_DIR, N_CLASSES, N_ATTRIBUTES, UPWEIGHT_RATIO, MIN_LR, LR_DECAY_SIZE
-from CUB.models import ModelXtoCY, ModelXtoChat_ChatToY, ModelXtoY, ModelXtoC, ModelOracleCtoY, ModelXtoCtoY
+from CUB.models import ModelXtoCY, ModelXtoChat_ChatToY, ModelXtoY, ModelXtoC, ModelOracleCtoY, ModelXtoCtoY, ModelXtoCtoYLatent
+from CUB.losses import leakage_loss, estimate_leakage_loss
 
 
 def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion, args, is_training):
@@ -49,7 +50,7 @@ def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion,
             optimizer.step() #optimizer step to update parameters
     return loss_meter, acc_meter
 
-def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_criterion, args, is_training):
+def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_criterion, latent_criterion, attr_logger, args, is_training):
     """
     For the rest of the networks (X -> A, cotraining, simple finetune)
     """
@@ -58,7 +59,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
     else:
         model.eval()
 
-    for _, data in enumerate(loader):
+    for batch, data in enumerate(loader):
         if attr_criterion is None:
             inputs, labels = data
             attr_labels, attr_labels_var = None, None
@@ -91,6 +92,14 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 for i in range(len(attr_criterion)):
                     losses.append(args.attr_loss_weight * (1.0 * attr_criterion[i](outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]) \
                                                             + 0.4 * attr_criterion[i](aux_outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
+            if latent_criterion is not None and args.latent_attr_loss_weight > 0 and args.n_latent_attr > 0:
+                losses.append(args.latent_attr_loss_weight * args.n_latent_attr * ((1.0 * latent_criterion(torch.stack(outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor)) \
+                                                            + 0.4 * latent_criterion(torch.stack(aux_outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(aux_outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor)))))
+        
+            if attr_logger:
+                outputs_first = torch.stack(outputs[out_start:], dim=0).squeeze()[:,1].tolist()
+                attr_logger.write(str(batch)+","+','.join(map(str, outputs_first))+'\n')
+        
         else: #testing or no aux logits
             outputs = model(inputs_var)
             losses = []
@@ -102,6 +111,16 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
             if attr_criterion is not None and args.attr_loss_weight > 0: #X -> A, cotraining, end2end
                 for i in range(len(attr_criterion)):
                     losses.append(args.attr_loss_weight * attr_criterion[i](outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]))
+        
+            if latent_criterion is not None and args.latent_attr_loss_weight > 0 and args.n_latent_attr > 0:
+                losses.append(args.latent_attr_loss_weight * args.n_latent_attr * latent_criterion(torch.stack(outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor)))
+
+            if attr_logger:
+                outputs_first = torch.stack(outputs[out_start:], dim=0).squeeze()[:,1].tolist()
+                print(outputs_first)
+                attr_logger.write(str(batch)+","+','.join(map(str, outputs_first))+'\n')
+
+        print(losses)
 
         if args.bottleneck: #attribute accuracy
             sigmoid_outputs = torch.nn.Sigmoid()(torch.cat(outputs, dim=1))
@@ -117,14 +136,18 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
             else: #cotraining, loss by class prediction and loss by attribute prediction have the same weight
                 total_loss = losses[0] + sum(losses[1:])
                 if args.normalize_loss:
-                    total_loss = total_loss / (1 + args.attr_loss_weight * args.n_attributes)
+                    total_loss = total_loss / (1 + args.attr_loss_weight * args.n_attributes + args.latent_attr_loss_weight * args.n_latent_attr) 
         else: #finetune
             total_loss = sum(losses)
         loss_meter.update(total_loss.item(), inputs.size(0))
+        print(total_loss.item())
         if is_training:
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+        
+        
+        
     return loss_meter, acc_meter
 
 def train(model, args):
@@ -148,8 +171,15 @@ def train(model, args):
     logger.write(str(imbalance) + '\n')
     logger.flush()
 
+    if args.log_attr:
+        attr_logger = Logger(os.path.join(args.log_dir, 'attr_logs.csv'))
+        attr_logger.flush()
+    else:
+        attr_logger = None
+
     model = model.cuda()
     criterion = torch.nn.CrossEntropyLoss()
+    latent_criterion = estimate_leakage_loss
     if args.use_attr and not args.no_img:
         attr_criterion = [] #separate criterion (loss function) for each attribute
         if args.weighted_loss:
@@ -196,7 +226,7 @@ def train(model, args):
         if args.no_img:
             train_loss_meter, train_acc_meter = run_epoch_simple(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, args, is_training=True)
         else:
-            train_loss_meter, train_acc_meter = run_epoch(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, attr_criterion, args, is_training=True)
+            train_loss_meter, train_acc_meter = run_epoch(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, attr_criterion, latent_criterion, attr_logger, args, is_training=True)
  
         if not args.ckpt: # evaluate on val set
             val_loss_meter = AverageMeter()
@@ -206,7 +236,7 @@ def train(model, args):
                 if args.no_img:
                     val_loss_meter, val_acc_meter = run_epoch_simple(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, args, is_training=False)
                 else:
-                    val_loss_meter, val_acc_meter = run_epoch(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, attr_criterion, args, is_training=False)
+                    val_loss_meter, val_acc_meter = run_epoch(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, attr_criterion, latent_criterion, attr_logger, args, is_training=False)
 
         else: #retraining
             val_loss_meter = train_loss_meter
@@ -266,6 +296,12 @@ def train_X_to_C_to_y(args):
                          expand_dim=args.expand_dim, use_relu=args.use_relu, use_sigmoid=args.use_sigmoid)
     train(model, args)
 
+def train_X_to_C_to_y_latent(args):
+    model = ModelXtoCtoYLatent(n_class_attr=args.n_class_attr, pretrained=args.pretrained, freeze=args.freeze,
+                         num_classes=N_CLASSES, use_aux=args.use_aux, n_attributes=args.n_attributes, n_latent_attr=args.n_latent_attr, 
+                         expand_dim=args.expand_dim, use_relu=args.use_relu, use_sigmoid=args.use_sigmoid)
+    train(model, args)    
+
 def train_X_to_y(args):
     model = ModelXtoY(pretrained=args.pretrained, freeze=args.freeze, num_classes=N_CLASSES, use_aux=args.use_aux)
     train(model, args)
@@ -295,7 +331,7 @@ def parse_arguments(experiment):
     parser.add_argument('exp', type=str,
                         choices=['Concept_XtoC', 'Independent_CtoY', 'Sequential_CtoY',
                                  'Standard', 'Multitask', 'Joint', 'Probe',
-                                 'TTI', 'Robustness', 'HyperparameterSearch'],
+                                 'TTI', 'Robustness', 'HyperparameterSearch', "Joint_Latent"],
                         help='Name of experiment to run.')
     parser.add_argument('--seed', required=True, type=int, help='Numpy and torch seed.')
 
@@ -313,6 +349,7 @@ def parse_arguments(experiment):
 
     else:
         parser.add_argument('-log_dir', default=None, help='where the trained model is saved')
+        parser.add_argument('-log_attr', action='store_true', help='whether to log attributes as a csv')
         parser.add_argument('-batch_size', '-b', type=int, help='mini-batch size')
         parser.add_argument('-epochs', '-e', type=int, help='epochs for training process')
         parser.add_argument('-save_step', default=1000, type=int, help='number of epochs to save model')
@@ -325,6 +362,7 @@ def parse_arguments(experiment):
         parser.add_argument('-use_attr', action='store_true',
                             help='whether to use attributes (FOR COTRAINING ARCHITECTURE ONLY)')
         parser.add_argument('-attr_loss_weight', default=1.0, type=float, help='weight for loss by predicting attributes')
+        parser.add_argument('-latent_attr_loss_weight', default=1.0, type=float, help='weight for loss by predicting latent attributes')
         parser.add_argument('-no_img', action='store_true',
                             help='if included, only use attributes (and not raw imgs) for class prediction')
         parser.add_argument('-bottleneck', help='whether to predict attributes before class labels', action='store_true')
@@ -334,6 +372,8 @@ def parse_arguments(experiment):
                             help='whether to use (normalized) attribute certainties as labels')
         parser.add_argument('-n_attributes', type=int, default=N_ATTRIBUTES,
                             help='whether to apply bottlenecks to only a few attributes')
+        parser.add_argument('-n_latent_attr', type=int, default=0,
+                            help='whether to apply bottlenecks to only a few latent attributes')
         parser.add_argument('-expand_dim', type=int, default=0,
                             help='dimension of hidden layer (if we want to increase model capacity) - for bottleneck only')
         parser.add_argument('-n_class_attr', type=int, default=2,
