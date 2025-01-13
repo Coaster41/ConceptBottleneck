@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 def leakage_loss(c_hat, c_tilde):
     c_hat = c_hat.T.unsqueeze(-1)
@@ -27,35 +28,50 @@ def leakage_loss(c_hat, c_tilde):
 
     return (log_det_sigma - log_det_sigma_tilde) / 2
 
-def estimate_leakage_loss(c_hat, c_tilde, delta=1, m=100):
-    c_hat = c_hat.T
-    c_tilde = c_tilde.T
-    batch_size = c_hat.shape[0]
-    c = torch.concatenate((c_hat, c_tilde), axis=1).squeeze() # 64, 256+128
-    concepts = c.shape[1]
+def get_corr_to_std_torch(batch_size, std=1, mean=0, samples=100):
+    min_corr = -1
+    max_corr = 1
+    step = 0.01
+    scale_log = 2
+    scale = 10**scale_log
+    corr_to_std = []
+    remapping_index = torch.arange(int(scale*min_corr), int((max_corr+step)*scale), int(step*scale)).cuda()
+
+    for corr in range(int(scale*min_corr), int((max_corr+step)*scale), int(step*scale)):
+        corr /= scale
+        cov_matrix = np.ones((2,2))
+        np.fill_diagonal(cov_matrix, std**2)
+        cov_matrix[0,1] = corr*std**2
+        cov_matrix[1,0] = corr*std**2
+        z = np.random.multivariate_normal(np.ones(2)*mean, cov_matrix, (samples, batch_size))
+        corr_z = []
+        for sample in z:
+            corr_z.append(np.corrcoef(sample, rowvar=False)[0,1])
+        std_corr_z = np.std(corr_z)
+        corr_to_std.append(std_corr_z)
+        
+    corr_to_std = torch.tensor(corr_to_std).cuda()
+
+    def get_std(correlation): # interpolation
+        index = torch.round(correlation*scale)
+        bucket_index = torch.bucketize(index.ravel(), remapping_index)
+        return corr_to_std[bucket_index].reshape(bucket_index.shape)
+    return get_std
+
+def get_cov_torch(c, get_std, delta=1):
     p_hat = torch.corrcoef(c.T) # 256+128, 256+128
-    p_hat.fill_diagonal_(0.99999)
-    
-    mu = torch.arctanh(p_hat.flatten())
-    sigma = torch.tensor([1/(batch_size-3)]).cuda() if torch.cuda.is_available() else torch.tensor(1/(batch_size-3))
-    print(torch.repeat_interleave(mu, m).reshape(mu.shape[0],m))
-    z_hat = torch.normal(torch.repeat_interleave(mu, m), torch.repeat_interleave(sigma,m*concepts**2)).reshape(m, concepts**2)
-    p_var = torch.std(torch.tanh(z_hat), axis=0)
-    S_p = torch.sqrt(torch.sum(p_var**2))
+
+    # calculate S_p
+    S_p = torch.sum(get_std(p_hat)**2)**0.5
+
 
     # estimate gamma
-    print(p_hat)
-    print(batch_size, p_hat.shape, p_var.shape)
-    print(p_var)
-    print(p_var.mean(), p_var.min(), p_var.max(), p_var.std())
-    for gamma in range(2, 100, 2):
+    for gamma in range(2, 10, 2):
         p_hat_gamma = p_hat**gamma * p_hat
-        print(torch.norm(p_hat - p_hat_gamma), delta * S_p)
-        if torch.norm(p_hat - p_hat_gamma) >= delta * S_p:
+        # print('gamma:', gamma, torch.linalg.norm(p_hat - p_hat_gamma), delta * S_p)
+        if torch.linalg.norm(p_hat - p_hat_gamma) >= delta * S_p:
             gamma_star = gamma
             break
-    print(torch.norm(p_hat))
-    print(gamma_star)
 
     # estimate alpha
     scale = 1000
@@ -64,13 +80,25 @@ def estimate_leakage_loss(c_hat, c_tilde, delta=1, m=100):
         alpha /= scale
         L_alpha = alpha * p_hat ** gamma_star + (1-alpha) *p_hat ** (gamma_star-2)
         p_hat_alpha = L_alpha * p_hat
-        if torch.norm(p_hat - p_hat_alpha) >= delta * S_p:
+        # print('alpha:', alpha, torch.linalg.norm(p_hat - p_hat_alpha), delta * S_p)
+        if torch.linalg.norm(p_hat - p_hat_alpha) >= delta * S_p:
             alpha_star = alpha - step
+            break
 
     L_alpha_star = alpha_star * p_hat ** gamma_star + (1-alpha_star) *p_hat ** (gamma_star-2)
     p_hat_nice = L_alpha_star * p_hat
 
     V_hat = torch.diagflat(torch.std(c, axis=0))
     P_hat_nice = torch.matmul(torch.matmul(V_hat, p_hat_nice), V_hat) # Covariance estimate
+    return P_hat_nice
 
-    return -0.5 * torch.log(torch.linalg.det(P_hat_nice[-c_tilde.shape[1]:, -c_tilde.shape[1]:]) / torch.linalg.det(P_hat_nice))
+def estimate_leakage_loss(c_hat, c_tilde, get_std, delta=1, m=100):
+    c_hat = c_hat.T
+    c_tilde = c_tilde.T
+    c = torch.concatenate((c_hat, c_tilde), axis=1).squeeze() # 64, 256+128
+
+    P_hat_nice = get_cov_torch(c, get_std)
+
+    print(torch.sum(P_hat_nice), torch.logdet(P_hat_nice[-c_tilde.shape[1]:, -c_tilde.shape[1]:]),  torch.logdet(P_hat_nice))
+
+    return -0.5 * (torch.logdet(P_hat_nice[-c_tilde.shape[1]:, -c_tilde.shape[1]:]) - torch.logdet(P_hat_nice))

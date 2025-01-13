@@ -16,7 +16,7 @@ from CUB import probe, tti, gen_cub_synthetic, hyperopt
 from CUB.dataset import load_data, find_class_imbalance
 from CUB.config import BASE_DIR, N_CLASSES, N_ATTRIBUTES, UPWEIGHT_RATIO, MIN_LR, LR_DECAY_SIZE
 from CUB.models import ModelXtoCY, ModelXtoChat_ChatToY, ModelXtoY, ModelXtoC, ModelOracleCtoY, ModelXtoCtoY, ModelXtoCtoYLatent
-from CUB.losses import leakage_loss, estimate_leakage_loss
+from CUB.losses import leakage_loss, estimate_leakage_loss, get_corr_to_std_torch
 
 
 def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion, args, is_training):
@@ -50,7 +50,7 @@ def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion,
             optimizer.step() #optimizer step to update parameters
     return loss_meter, acc_meter
 
-def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_criterion, latent_criterion, attr_logger, args, is_training):
+def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_criterion, latent_criterion, get_std, attr_logger, args, is_training):
     """
     For the rest of the networks (X -> A, cotraining, simple finetune)
     """
@@ -93,8 +93,8 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                     losses.append(args.attr_loss_weight * (1.0 * attr_criterion[i](outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]) \
                                                             + 0.4 * attr_criterion[i](aux_outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
             if latent_criterion is not None and args.latent_attr_loss_weight > 0 and args.n_latent_attr > 0:
-                losses.append(args.latent_attr_loss_weight * args.n_latent_attr * ((1.0 * latent_criterion(torch.stack(outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor)) \
-                                                            + 0.4 * latent_criterion(torch.stack(aux_outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(aux_outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor)))))
+                losses.append(args.latent_attr_loss_weight * args.n_latent_attr * ((1.0 * latent_criterion(torch.stack(outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor), get_std) \
+                                                            + 0.4 * latent_criterion(torch.stack(aux_outputs[out_start:args.n_attributes+out_start], dim=0).squeeze().type(torch.cuda.FloatTensor), torch.stack(aux_outputs[args.n_attributes+out_start:], dim=0).squeeze().type(torch.cuda.FloatTensor), get_std))))
         
             if attr_logger:
                 outputs_first = torch.stack(outputs[out_start:], dim=0).squeeze()[:,1].tolist()
@@ -226,7 +226,8 @@ def train(model, args):
         if args.no_img:
             train_loss_meter, train_acc_meter = run_epoch_simple(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, args, is_training=True)
         else:
-            train_loss_meter, train_acc_meter = run_epoch(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, attr_criterion, latent_criterion, attr_logger, args, is_training=True)
+            get_std = get_corr_to_std_torch(args.batch_size)
+            train_loss_meter, train_acc_meter = run_epoch(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, attr_criterion, latent_criterion, get_std, attr_logger, args, is_training=True)
  
         if not args.ckpt: # evaluate on val set
             val_loss_meter = AverageMeter()
@@ -236,7 +237,8 @@ def train(model, args):
                 if args.no_img:
                     val_loss_meter, val_acc_meter = run_epoch_simple(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, args, is_training=False)
                 else:
-                    val_loss_meter, val_acc_meter = run_epoch(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, attr_criterion, latent_criterion, attr_logger, args, is_training=False)
+                    get_std = get_corr_to_std_torch(args.batch_size)
+                    val_loss_meter, val_acc_meter = run_epoch(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, attr_criterion, latent_criterion, get_std, attr_logger, args, is_training=False)
 
         else: #retraining
             val_loss_meter = train_loss_meter
