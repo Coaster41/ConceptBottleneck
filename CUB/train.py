@@ -59,7 +59,9 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
     else:
         model.eval()
 
+    cont_loss = 0
     for batch, data in enumerate(loader):
+        print(batch)
         if attr_criterion is None:
             inputs, labels = data
             attr_labels, attr_labels_var = None, None
@@ -141,9 +143,13 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
             total_loss = sum(losses)
         loss_meter.update(total_loss.item(), inputs.size(0))
         print(total_loss.item())
+        cont_loss += total_loss
         if is_training:
-            optimizer.zero_grad()
-            total_loss.backward()
+            if (batch+1) % 10 == 0:
+                optimizer.zero_grad()
+                cont_loss.backward(retain_graph=False)
+                cont_loss = 0
+            total_loss.backward(retain_graph=True)
             optimizer.step()
         
         

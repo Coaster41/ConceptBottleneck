@@ -9,6 +9,7 @@ import argparse
 import numpy as np
 from sklearn.metrics import f1_score
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from CUB.losses import get_cov_torch
 
 from CUB.dataset import load_data
 from CUB.config import BASE_DIR, N_CLASSES, N_ATTRIBUTES
@@ -86,6 +87,8 @@ def eval(args):
     all_class_labels, all_class_outputs, all_class_logits = [], [], []
     topk_class_labels, topk_class_outputs = [], []
 
+    batch_attr = []
+
     for data_idx, data in enumerate(loader):
         if args.use_attr:
             if args.no_img:  # A -> Y
@@ -111,6 +114,7 @@ def eval(args):
                 outputs.extend(attr_model(inputs_var))
         else:
             outputs = model(inputs_var)
+            # print(len(outputs), outputs[0].shape, outputs[1].shape)
         if args.use_attr:
             if args.no_img:  # A -> Y
                 class_outputs = outputs
@@ -145,6 +149,7 @@ def eval(args):
                     class_outputs = outputs[0]
 
                 for i in range(args.n_attributes):
+                    # print(len(attr_outputs_sigmoid), attr_outputs_sigmoid[i].shape, attr_labels.shape)
                     acc = binary_accuracy(attr_outputs_sigmoid[i].squeeze(), attr_labels[:, i])
                     acc = acc.data.cpu().numpy()
                     # acc = accuracy(attr_outputs_sigmoid[i], attr_labels[:, i], topk=(1,))
@@ -160,72 +165,89 @@ def eval(args):
         else:
             class_outputs = outputs[0]
 
-        _, topk_preds = class_outputs.topk(max(K), 1, True, True)
-        _, preds = class_outputs.topk(1, 1, True, True)
-        all_class_outputs.extend(list(preds.detach().cpu().numpy().flatten()))
-        all_class_labels.extend(list(labels.data.cpu().numpy()))
-        all_class_logits.extend(class_outputs.detach().cpu().numpy())
-        topk_class_outputs.extend(topk_preds.detach().cpu().numpy())
-        topk_class_labels.extend(labels.view(-1, 1).expand_as(preds))
+        print(attr_outputs.shape)
+        # attr_torch = torch.stack(attr_outputs).squeeze()
+        # print(attr_torch.shape())
+        batch_attr.append(attr_outputs.squeeze().detach().cpu())
+        print(data_idx, (data_idx+1) % 16 == 0)
+        if (data_idx+1) % 16 == 0:
+            tot_attr = torch.concatenate(batch_attr)
+            print('tot_attr:', tot_attr.shape)
+            cov_attr = torch.cov(tot_attr.T)
+            print(cov_attr.shape)
+            # eighvals_P_hat = torch.linalg.eigvals(cov_attr)
+            logdet = torch.logdet(cov_attr)
+            print(logdet)
+            # if torch.logdet(cov_attr):
+            #     print('negative eigenvalues sample correlation')
 
-        np.set_printoptions(threshold=sys.maxsize)
-        class_acc = accuracy(class_outputs, labels, topk=K)  # only class prediction accuracy
-        for m in range(len(class_acc_meter)):
-            class_acc_meter[m].update(class_acc[m], inputs.size(0))
+    #     _, topk_preds = class_outputs.topk(max(K), 1, True, True)
+    #     _, preds = class_outputs.topk(1, 1, True, True)
+    #     all_class_outputs.extend(list(preds.detach().cpu().numpy().flatten()))
+    #     all_class_labels.extend(list(labels.data.cpu().numpy()))
+    #     all_class_logits.extend(class_outputs.detach().cpu().numpy())
+    #     topk_class_outputs.extend(topk_preds.detach().cpu().numpy())
+    #     topk_class_labels.extend(labels.view(-1, 1).expand_as(preds))
 
-    all_class_logits = np.vstack(all_class_logits)
-    topk_class_outputs = np.vstack(topk_class_outputs)
-    topk_class_labels = np.vstack(topk_class_labels)
-    wrong_idx = np.where(np.sum(topk_class_outputs == topk_class_labels, axis=1) == 0)[0]
+    #     np.set_printoptions(threshold=sys.maxsize)
+    #     print(class_outputs.shape, labels.shape)
+    #     class_acc = accuracy(class_outputs, labels, topk=K)  # only class prediction accuracy
+    #     for m in range(len(class_acc_meter)):
+    #         class_acc_meter[m].update(class_acc[m], inputs.size(0))
 
-    for j in range(len(K)):
-        print('Average top %d class accuracy: %.5f' % (K[j], class_acc_meter[j].avg))
+    # all_class_logits = np.vstack(all_class_logits)
+    # topk_class_outputs = np.vstack(topk_class_outputs)
+    # topk_class_labels = np.vstack(topk_class_labels)
+    # wrong_idx = np.where(np.sum(topk_class_outputs == topk_class_labels, axis=1) == 0)[0]
 
-    if args.use_attr and not args.no_img:  # print some metrics for attribute prediction performance
-        print('Average attribute accuracy: %.5f' % attr_acc_meter[0].avg)
-        all_attr_outputs_int = np.array(all_attr_outputs_sigmoid) >= 0.5
-        if args.feature_group_results:
-            n = len(all_attr_labels)
-            all_attr_acc, all_attr_f1 = [], []
-            for i in range(args.n_attributes):
-                acc_meter = attr_acc_meter[1 + i]
-                attr_acc = float(acc_meter.avg)
-                attr_preds = [all_attr_outputs_int[j] for j in range(n) if j % args.n_attributes == i]
-                attr_labels = [all_attr_labels[j] for j in range(n) if j % args.n_attributes == i]
-                attr_f1 = f1_score(attr_labels, attr_preds)
-                all_attr_acc.append(attr_acc)
-                all_attr_f1.append(attr_f1)
+    # for j in range(len(K)):
+    #     print('Average top %d class accuracy: %.5f' % (K[j], class_acc_meter[j].avg))
 
-            '''
-            fig, axs = plt.subplots(1, 2, figsize=(20,10))
-            for plt_id, values in enumerate([all_attr_acc, all_attr_f1]):
-                axs[plt_id].set_xticks(np.arange(0, 1.1, 0.1))
-                if plt_id == 0:
-                    axs[plt_id].hist(np.array(values)/100.0, bins=np.arange(0, 1.1, 0.1), rwidth=0.8)
-                    axs[plt_id].set_title("Attribute accuracies distribution")
-                else:
-                    axs[plt_id].hist(values, bins=np.arange(0, 1.1, 0.1), rwidth=0.8)
-                    axs[plt_id].set_title("Attribute F1 scores distribution")
-            plt.savefig('/'.join(args.model_dir.split('/')[:-1]) + '.png')
-            '''
-            bins = np.arange(0, 1.01, 0.1)
-            acc_bin_ids = np.digitize(np.array(all_attr_acc) / 100.0, bins)
-            acc_counts_per_bin = [np.sum(acc_bin_ids == (i + 1)) for i in range(len(bins))]
-            f1_bin_ids = np.digitize(np.array(all_attr_f1), bins)
-            f1_counts_per_bin = [np.sum(f1_bin_ids == (i + 1)) for i in range(len(bins))]
-            print("Accuracy bins:")
-            print(acc_counts_per_bin)
-            print("F1 bins:")
-            print(f1_counts_per_bin)
-            np.savetxt(os.path.join(args.log_dir, 'concepts.txt'), f1_counts_per_bin)
+    # if args.use_attr and not args.no_img:  # print some metrics for attribute prediction performance
+    #     print('Average attribute accuracy: %.5f' % attr_acc_meter[0].avg)
+    #     all_attr_outputs_int = np.array(all_attr_outputs_sigmoid) >= 0.5
+    #     if args.feature_group_results:
+    #         n = len(all_attr_labels)
+    #         all_attr_acc, all_attr_f1 = [], []
+    #         for i in range(args.n_attributes):
+    #             acc_meter = attr_acc_meter[1 + i]
+    #             attr_acc = float(acc_meter.avg)
+    #             attr_preds = [all_attr_outputs_int[j] for j in range(n) if j % args.n_attributes == i]
+    #             attr_labels = [all_attr_labels[j] for j in range(n) if j % args.n_attributes == i]
+    #             attr_f1 = f1_score(attr_labels, attr_preds)
+    #             all_attr_acc.append(attr_acc)
+    #             all_attr_f1.append(attr_f1)
 
-        balanced_acc, report = multiclass_metric(all_attr_outputs_int, all_attr_labels)
-        f1 = f1_score(all_attr_labels, all_attr_outputs_int)
-        print("Total 1's predicted:", sum(np.array(all_attr_outputs_sigmoid) >= 0.5) / len(all_attr_outputs_sigmoid))
-        print('Avg attribute balanced acc: %.5f' % (balanced_acc))
-        print("Avg attribute F1 score: %.5f" % f1)
-        print(report + '\n')
-    return class_acc_meter, attr_acc_meter, all_class_labels, topk_class_outputs, all_class_logits, all_attr_labels, all_attr_outputs, all_attr_outputs_sigmoid, wrong_idx, all_attr_outputs2
+    #         '''
+    #         fig, axs = plt.subplots(1, 2, figsize=(20,10))
+    #         for plt_id, values in enumerate([all_attr_acc, all_attr_f1]):
+    #             axs[plt_id].set_xticks(np.arange(0, 1.1, 0.1))
+    #             if plt_id == 0:
+    #                 axs[plt_id].hist(np.array(values)/100.0, bins=np.arange(0, 1.1, 0.1), rwidth=0.8)
+    #                 axs[plt_id].set_title("Attribute accuracies distribution")
+    #             else:
+    #                 axs[plt_id].hist(values, bins=np.arange(0, 1.1, 0.1), rwidth=0.8)
+    #                 axs[plt_id].set_title("Attribute F1 scores distribution")
+    #         plt.savefig('/'.join(args.model_dir.split('/')[:-1]) + '.png')
+    #         '''
+    #         bins = np.arange(0, 1.01, 0.1)
+    #         acc_bin_ids = np.digitize(np.array(all_attr_acc) / 100.0, bins)
+    #         acc_counts_per_bin = [np.sum(acc_bin_ids == (i + 1)) for i in range(len(bins))]
+    #         f1_bin_ids = np.digitize(np.array(all_attr_f1), bins)
+    #         f1_counts_per_bin = [np.sum(f1_bin_ids == (i + 1)) for i in range(len(bins))]
+    #         print("Accuracy bins:")
+    #         print(acc_counts_per_bin)
+    #         print("F1 bins:")
+    #         print(f1_counts_per_bin)
+    #         np.savetxt(os.path.join(args.log_dir, 'concepts.txt'), f1_counts_per_bin)
+
+    #     balanced_acc, report = multiclass_metric(all_attr_outputs_int, all_attr_labels)
+    #     f1 = f1_score(all_attr_labels, all_attr_outputs_int)
+    #     print("Total 1's predicted:", sum(np.array(all_attr_outputs_sigmoid) >= 0.5) / len(all_attr_outputs_sigmoid))
+    #     print('Avg attribute balanced acc: %.5f' % (balanced_acc))
+    #     print("Avg attribute F1 score: %.5f" % f1)
+    #     print(report + '\n')
+    # return class_acc_meter, attr_acc_meter, all_class_labels, topk_class_outputs, all_class_logits, all_attr_labels, all_attr_outputs, all_attr_outputs_sigmoid, wrong_idx, all_attr_outputs2
 
 if __name__ == '__main__':
     torch.backends.cudnn.benchmark=True
@@ -246,7 +268,7 @@ if __name__ == '__main__':
     parser.add_argument('-use_relu', help='Whether to include relu activation before using attributes to predict Y. For end2end & bottleneck model', action='store_true')
     parser.add_argument('-use_sigmoid', help='Whether to include sigmoid activation before using attributes to predict Y. For end2end & bottleneck model', action='store_true')
     args = parser.parse_args()
-    args.batch_size = 16
+    args.batch_size = 64
 
     print(args)
     y_results, c_results = [], []
@@ -254,15 +276,15 @@ if __name__ == '__main__':
         args.model_dir = model_dir
         args.model_dir2 = args.model_dirs2[i] if args.model_dirs2 else None
         result = eval(args)
-        class_acc_meter, attr_acc_meter = result[0], result[1]
-        y_results.append(1 - class_acc_meter[0].avg[0].item() / 100.)
-        if attr_acc_meter is not None:
-            c_results.append(1 - attr_acc_meter[0].avg.item() / 100.)
-        else:
-            c_results.append(-1)
-    values = (np.mean(y_results), np.std(y_results), np.mean(c_results), np.std(c_results))
-    output_string = '%.4f %.4f %.4f %.4f' % values
-    print_string = 'Error of y: %.4f +- %.4f, Error of C: %.4f +- %.4f' % values
-    print(print_string)
-    output = open(os.path.join(args.log_dir, 'results.txt'), 'w')
-    output.write(output_string)
+    #     class_acc_meter, attr_acc_meter = result[0], result[1]
+    #     y_results.append(1 - class_acc_meter[0].avg[0].item() / 100.)
+    #     if attr_acc_meter is not None:
+    #         c_results.append(1 - attr_acc_meter[0].avg.item() / 100.)
+    #     else:
+    #         c_results.append(-1)
+    # values = (np.mean(y_results), np.std(y_results), np.mean(c_results), np.std(c_results))
+    # output_string = '%.4f %.4f %.4f %.4f' % values
+    # print_string = 'Error of y: %.4f +- %.4f, Error of C: %.4f +- %.4f' % values
+    # print(print_string)
+    # output = open(os.path.join(args.log_dir, 'results.txt'), 'w')
+    # output.write(output_string)

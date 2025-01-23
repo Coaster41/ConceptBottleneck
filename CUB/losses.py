@@ -60,6 +60,16 @@ def get_corr_to_std_torch(batch_size, std=1, mean=0, samples=100):
 
 def get_cov_torch(c, get_std, delta=1):
     p_hat = torch.corrcoef(c.T) # 256+128, 256+128
+    # P_hat = torch.cov(c.T)
+    # eighvals_p_hat = torch.linalg.eigvals(p_hat)
+    # eighvals_P_hat = torch.linalg.eigvals(P_hat)
+    # # if torch.any(eighvals_p_hat < 0):
+    # #     print('negative eigenvalues sample correlation')
+    # # print(eighvals_p_hat)
+    # # if torch.any(eighvals_P_hat < 0):
+    # #     print('negative eigenvalues sample covariance')
+    # # print(eighvals_P_hat)
+
 
     # calculate S_p
     S_p = torch.sum(get_std(p_hat)**2)**0.5
